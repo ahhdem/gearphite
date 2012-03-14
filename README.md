@@ -1,20 +1,21 @@
 # Introduction
 
-Graphios is a script to put nagios perfdata into graphite (carbon).
+Gearphite is a fork of Graphios to support processing of performance date from mod_gearman queue as well as nagios spool directory
 
 # Requirements
 
 * A working nagios / icinga server
 * A running carbon server (carbon-cache.py) (part of graphite)
 * Python 2.4 or later
+* working mod_gearman setup, with perfdata=yes
 
 # License
 
-Graphios is release under the [GPL v2](http://www.gnu.org/licenses/gpl-2.0.html).
+Gearphite/Graphios is release under the [GPL v2](http://www.gnu.org/licenses/gpl-2.0.html).
 
 # Documentation
 
-The goal of graphios is to get nagios perf data into graphite (carbon).
+The goal of this tool is to get nagios perf data into graphite (carbon).
 
 The way we accomplish this is by setting up custom variables for services and hosts called \_graphiteprefix and \_graphitepostfix. This allows you to control the string that gets sent to graphite. You can set just the prefix or just the posfix.
 
