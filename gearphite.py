@@ -1,29 +1,14 @@
-#!/usr/bin/python -tt
-#
-# Copyright (C) 2011  Shawn Sterling <shawn@systemtemplar.org>
-#
-# This program is free software; you can redistribute it and/or
-# modify it under the terms of the GNU General Public License
-# as published by the Free Software Foundation; either version 2
-# of the License, or (at your option) any later version.
-#
-# This program is distributed in the hope that it will be useful,
-# but WITHOUT ANY WARRANTY; without even the implied warranty of
-# MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE.  See the
-# GNU General Public License for more details.
-#
-# You should have received a copy of the GNU General Public License
-# along with this program; if not, write to the Free Software
-# Foundation, Inc., 51 Franklin Street, Fifth Floor, Boston, MA
-# 02110-1301, USA.
-#
-# graphios: this program will read nagios host and service perfdata, and
-# send it to a carbon server.
-#
-# The latest version of this code will be found on my github page:
-# https://github.com/shawn-sterling
+#!/usr/bin/env /usr/bin/python 
+"""
+    gearphite - gearman perfdata ripper
+    copyright 2012, Adam Backer, Karsten McMinn
+
+    Ugly yet effective daemon script for pushing
+    data into opentsdb from nagios.
+"""
 
 import os
+import optparse
 import sys
 import re
 import logging
@@ -33,141 +18,152 @@ import socket
 import cPickle as pickle
 import struct
 
-############################################################
-##### You will likely need to change some of the below #####
+import gearman, base64
+from Crypto.Cipher import AES
 
-# carbon server info
-carbon_server = '127.0.0.1'
+# log levels
+logLevels = {
+                'critical': logging.CRITICAL,
+                'error': logging.ERROR,
+                'warning': logging.WARNING,
+                'info': logging.INFO,
+                'debug': logging.DEBUG,
+            }
 
-# carbon pickle receiver port (normally 2004)
-carbon_port = 2004
+
+# opentsdb tsd server name
+tsd_server = 'graph.dev.internal.playfish.com'
+
+# opentsdb tsd server port 
+tsd_port = 8081
+
+# hostname:port of where the gearman queue is
+gearman_server = [ 'dev-mon-nag02m:4730' ]
+
+# worker id 
+worker_id = 'perfdata_'+socket.gethostname()
 
 # nagios spool directory
-spool_directory = '/var/spool/nagios/graphios'
+spool_directory = '/var/spool/nagios/gearphite'
 
-# graphios log info
-log_file = '/var/log/nagios/graphios.log'
+#use nagios spool directory or gearman (0:spool or 1:gearman) -- addition, not from PoC
+perfdata_source = 1 
+
+# gearphite log locatoin
 log_max_size = 25165824         # 24 MB
-log_level = logging.INFO
-#log_level = logging.DEBUG      # DEBUG is quite verbose
+log_file = '/mnt/logs/icinga/gearphite.log'
+
+# uncomment to override setting log level on command line
+log_level = 'info'
 
 # How long to sleep between processing the spool directory
 sleep_time = 15
 
-# when we can't connect to carbon, the sleeptime is doubled until we hit max
-sleep_max = 480
+# when we can't connect to opentsdb, the sleeptime is doubled until we hit max
+sleep_max = 30
 
-# test mode makes it so we print what we would add to carbon, and not delete
-# any files from the spool directory. log_level must be DEBUG as well.
-test_mode = False
+#set secret key  
+secretkey = 'pfg342m4n'
 
-##### You should stop changing things unless you know what you are doing #####
-##############################################################################
+
+parser = optparse.OptionParser()
+parser.add_option('-l', '--logging-level', help='set log level (critical,error,warning,info, debug) \
+    default set to: ' +str(log_level))
+parser.add_option('-m', '--more-metrics', action="store_true", help='enable printing of ' 
+    + 'each sent metric, one per line')
+parser.add_option('-s', '--gearman-server', help='specify a gearman server to connect to'
+    + ' [format HOST:PORT]')
+(options, args) = parser.parse_args()
 
 sock = socket.socket()
+
+
+# log not available to all threads if defined in main(), cheap hack
 log = logging.getLogger('log')
-log.setLevel(log_level)
 log_handler = logging.handlers.RotatingFileHandler(log_file,
     maxBytes=log_max_size, backupCount=4)
 f = logging.Formatter("%(asctime)s %(filename)s %(levelname)s %(message)s",
     "%B %d %H:%M:%S")
-log_handler.setFormatter(f)
-log.addHandler(log_handler)
+
+if options.logging_level:
+    logging_level = logLevels.get(options.logging_level)
+    console = logging.StreamHandler()
+    log.setLevel(logging_level)
+    console.setFormatter(f)
+    log.addHandler(console)
+else:
+    logging_level = logLevels.get(log_level)
+    console = logging.StreamHandler()
+    log.setLevel(logging_level)
+    console.setFormatter(f)
+    log.addHandler(console)
+
+if options.gearman_server:
+    gearman_server = [ options.gearman_server ]
 
 
-def connect_carbon():
+def connect_tsd():
     """
-        Connects to Carbon server
+        Connects to  a OpenTSDB TSD daemon 
     """
     global sock
     sock = socket.socket()
     try:
-        sock.connect((carbon_server, carbon_port))
+        sock.connect((tsd_server, tsd_port))
         return True
     except Exception, e:
-        log.warning("Can't connect to carbon: %s:%s %s" % (carbon_server,
-            carbon_port, e))
+        log.warning("Can't connect to TSD Service: %s:%s %s" % (tsd_server,
+            tsd_port, e))
         return False
 
-
-def send_carbon(carbon_list):
+def send_tsd(output):
     """
-        Sends a list to Carbon, we postpend every entry with a \n as per
-        carbon documentation.
-        If we can't connect to carbin, it sleeps, and doubles sleep_time
-        until it hits sleep_max.
+        Sends a formatted list of data to opentsdb
+        every line will need to have a \n before doing send_all
     """
     global sock
     global sleep_time
-    message = convert_pickle(carbon_list)
-    #message = '\n'.join(carbon_list) + '\n'
+    message = ''
+    for elei in output:
+        line = 'put ' + elei
+        message += line + '\n'
+
+    if not message:
+        log.debug("tsd message empty, not sending")
+        return
+
     try:
         sock.sendall(message)
-        log.debug("sending to carbon: %s" % message)
+        log.debug("sending to opentsdb: %s" % message)
         return True
     except Exception, e:
-        log.critical("Can't send message to carbon error:%s" % (e))
+        log.critical("Can't send message to opentsdb error:%s" % (e))
         while True:
             sock.close()
-            if connect_carbon():
+            if connect_tsd():
                 sleep_time = 15     # reset sleep_time to 15
                 return False
             else:
                 if sleep_time < sleep_max:
                     sleep_time = sleep_time + sleep_time
-                    log.warning("Carbon not responding. Increasing " + \
+                    log.warning("TSD Service not responding. Increasing " + \
                         "sleep_time to %s." % (sleep_time))
                 else:
-                    log.warning("Carbon not responding. Sleeping %s" % \
+                    log.warning("TSD Service not responding. Sleeping %s" % \
                         (sleep_time))
             log.debug("sleeping %s" % (sleep_time))
             time.sleep(sleep_time)
         return False
 
 
-def convert_pickle(carbon_list):
+
+def process_data_file(file_name, delete_after=0):
     """
-        Converts a list into pickle formatted message and returns it
+        processes a file loaded with nagios perf data, and send to a
+        a tsd server
     """
-    pickle_list = []
-    for metric in carbon_list:
-        path, value, timestamp = metric.split(" ")
-        metric_tuple = (path, (timestamp, value))
-        pickle_list.append(metric_tuple)
+    tsd_lines = []
 
-    payload = pickle.dumps(pickle_list)
-    header = struct.pack("!L", len(payload))
-    message = header + payload
-    return message
-
-
-def process_host_data(file_name, delete_after=0):
-    """
-        processes a file loaded with nagios host data, and sends info to
-        a carbon server. If delete_after is 1, we delete the file when we
-        are done with it.
-
-        When nagios has host perf data, that is from check_host_alive, which
-        is the check_icmp plugin. The perf data looks like this:
-
-rta=1.066ms;5.000;10.000;0; pl=0%;5;10;; rtmax=4.368ms;;;; rtmin=0.196ms;;;;
-
-        We send to graphite:
-        (GRAPHITEPREFIX).HOSTNAME.(GRAPHITEPOSTFIX).perf value TIMET
-
-        Which for me I set the prefix to:
-        monitoring.domain.com.nagiosXX.pingto.
-
-        I leave the postfix blank (for this example)
-
-        So if i'm checking db01, from nagios host nagios01 my carbon lines
-        would be:
-
-        monitoring.domain.com.nagios01.pingto.db01.rta 1.0.66 timet
-        monitoring.domain.com.nagios01.pingto.db01.pl 0 timet
-        monitoring.domain.com.nagios01.pingto.db01.rtmax 4.368 timet
-        monitoring.domain.com.nagios01.pingto.db01.rtmin 0.196 timet
-    """
     try:
         f = open(file_name, "r")
         file_array = f.readlines()
@@ -175,67 +171,33 @@ rta=1.066ms;5.000;10.000;0; pl=0%;5;10;; rtmax=4.368ms;;;; rtmin=0.196ms;;;;
     except Exception, e:
         log.critical("Can't open file:%s error: %s" % (file_name, e))
         sys.exit(2)
-    graphite_lines = []
+
     for line in file_array:
         variables = line.split('\t')
-        data_type = ""
-        host_name = ""
-        time = ""
-        host_perf_data = ""
-        graphite_postfix = ""
-        graphite_prefix = ""
-        carbon_string = ""
-        for var in variables:
-            (var_name, value) = var.split('::')
-            if var_name == 'TIMET':
-                time = value
-            if var_name == 'HOSTNAME':
-                host_name = value
-            if var_name == 'HOSTPERFDATA':
-                host_perf_data = value
-            if var_name == 'GRAPHITEPOSTFIX':
-                value = re.sub("\s", "", value)
-                if value != "$_HOSTGRAPHITEPOSTFIX$":
-                    graphite_postfix = value
-            if var_name == 'GRAPHITEPREFIX':
-                value = re.sub("\s", "", value)
-                if str(value) != "$_HOSTGRAPHITEPREFIX$":
-                    graphite_prefix = value
-        if graphite_prefix == "" and graphite_postfix == "":
-# uncomment below if you are troubleshooting a weird plugin.
-#            log.debug("can't find graphiteprefix and postfix for %s in %s" % (
-#                line, file_name))
-            continue
-        if graphite_prefix != "":
-            carbon_string = "%s." % graphite_prefix
-        if host_name != "":
-            carbon_string = carbon_string + "%s." % host_name
-        else:
-            log.debug("hostname not found for %s in %s" % (line, file_name))
-            continue
-        if graphite_postfix != "":
-            carbon_string = carbon_string + "%s." % graphite_postfix
-        if host_perf_data != "":
-            graphite_lines.extend(process_host_perf_data(carbon_string, \
-                host_perf_data, time))
 
-    handle_file(file_name, graphite_lines, test_mode, delete_after)
+        host, command, time, service_perf_data = scrub_perfdata(perfdata)
 
 
-def handle_file(file_name, graphite_lines, test_mode, delete_after):
-    """
-        if we are test mode we just print the graphite lines.
-        if the graphite data gets into carbon, and delete_after is set
-        we remove the file.
-        if the graphite_lines has a length of 0, there was no graphite
-        data, and we remove the file.
-    """
-    if test_mode:
-        if len(graphite_lines) > 0:
-            log.debug("graphite_lines:%s" % (graphite_lines))
-    else:
-        if len(graphite_lines) > 0:
-            if send_carbon(graphite_lines):
+        tags.append('host='+str(host))
+
+        if command:
+            tags.append('command='+command)
+
+        log.debug("serviceperfdata="+service_perf_data)
+        try:
+            tsd_lines.extend(process_perfdata_tsd(service_perf_data, time, tags))
+        except Exception, e:
+            log.warning("Error building tsd list: " + str(e))
+            return
+
+        log.debug('tsd_lines=' + str(tsd_lines))
+        if len(tsd_lines) > 0:
+            if send_tsd(tsd_lines):
+                log.debug("OK sent %d metrics to tsd" % len(tsd_lines))
+                if options.more_metrics:
+                    for item in tsd_lines:
+                        print item
+
                 if delete_after:
                     log.debug("removing file, %s" % (file_name))
                     try:
@@ -244,206 +206,229 @@ def handle_file(file_name, graphite_lines, test_mode, delete_after):
                         log.critical("couldn't remove file %s error:%s" % (
                             file_name, e))
             else:
-                log.warning("message not sent to graphite, file not deleted.")
+                log.warning("Problem sending metric to: " + str(gearman_server[0]))
         else:
-            # file didn't have any graphite data in it, delete it.
-            if delete_after:
-                try:
-                    os.remove(file_name)
-                except Exception, e:
-                    log.critical("couldn't remove file %s error:%s" % (
-                        file_name, e))
+                log.debug("No perfdata found in this iteration")
+        return
+
+def scrub_perfdata(perfdata):
+
+    if not (len(perfdata) > 0):
+        log.warning("empty string coming from the gearman queue")
+        return
+    if not '=' in ''.join(perfdata):
+        log.warning('No perfdata found in string value..' + perfdata)
+        return
+
+    for elem in perfdata:
+        log.debug('Working on item: ' + str(elem))
+
+        if 'HOSTNAME' in elem:
+            host = elem.split('::')[1]
+            if len(host) < 2:
+                log.warning('something wrong with hostname: ' + str(host))
+                return
+
+        if 'PERFDATA' in elem and 'DATATYPE' not in elem:
+            service_perf_data = elem.split('::')[1]
+            if '/' in service_perf_data:
+                service_perf_data = service_perf_data.replace('/', '_')
+
+        if 'CHECKCOMMAND' in elem:
+            command = elem.split('::')[1]
 
 
-def process_host_perf_data(carbon_string, perf_data, time):
+        if 'TIMET' in elem:
+            time = elem.split('::')[1]
+    
+    if not command:
+        command = 'null'
+
+    if not host or not command or not time or not service_perf_data:
+        log.debug('problem with perfdata '
+            ' host=' + str(host) + ' command=' + str(command)
+            + ' time=' + str(time) + ' service_perf_data='
+            + str(service_perf_data))
+        return
+    else:
+        return ( host, command, time, service_perf_data )
+
+
+def process_service_data_gearman(perfdata):
     """
-        given the nagios perfdata, and some variables we return a list of
-        carbon formatted values. carbon_string should already have a trailing .
+        callback that parses monitoring data from gearman queue
+        and sends off to a server
     """
-    graphite_lines = []
-    perf_list = perf_data.split(" ")
-    for perf in perf_list:
-        (name, value) = process_perf_string(perf)
-        new_line = "%s%s %s %s" % (carbon_string, name, value, time)
-        log.debug("new line = %s" % (new_line))
-        graphite_lines.append(new_line)
+    global geaman_server
+    global options
+    server = gearman_server[0].split(':')[0]
+    tsd_lines = []
+    tags = [ 'metricsource='+server ]
 
-    return graphite_lines
+    host, command, time, service_perf_data = scrub_perfdata(perfdata)
+    
+    tags.append('host='+str(host))
 
+    if command:
+        tags.append('command='+command)
 
-def process_service_data(file_name, delete_after=0):
-    """
-        processes a file loaded with nagios service data, and sends info to
-        a carbon server. If delete_after is 1, we delete the file when we
-        are done with it.
-
-        here is what we send to carbon:
-
-        (GRAPHITEPREFIX).HOSTNAME.(GRAPHITEPOSTFIX).perf value timet
-
-        So, our example service will be
-        'MySQL Connection Time' where the perfdata looks like this:
-        connection_time=0.0213s;1;5
-
-        Let's say this is checked on host db01, and it is run from nagios01.
-
-        We set our graphiteprefix to be:
-        monitoring.domain.com.nagios01.mysql
-
-        the graphitepostfix in this case to be left blank
-
-        Giving us a final carbon metric of:
-        monitoring.domain.com.nagios01.mysql.db01.connection_time 0.0213 timet
-
-        Or let's say you have a plugin that gives the perf 'load=3.4;5;6;;'
-
-        In this case I want my carbon data to be:
-
-        hostname.domain.com.nagios.load
-
-        So I set the _graphitepostfix to 'domain.com.nagios'
-    """
+    log.debug("serviceperfdata="+service_perf_data)
     try:
-        f = open(file_name, "r")
-        file_array = f.readlines()
-        f.close
+        tsd_lines.extend(process_perfdata_tsd(service_perf_data, time, tags))
     except Exception, e:
-        log.critical("Can't open file:%s error: %s" % (file_name, e))
-        sys.exit(2)
-    graphite_lines = []
-    for line in file_array:
-        variables = line.split('\t')
-        data_type = ""
-        host_name = ""
-        time = ""
-        service_perf_data = ""
-        graphite_postfix = ""
-        graphite_prefix = ""
-        carbon_string = ""
-        for var in variables:
-            if re.search("::", var):
-                var_name = var.split('::')[0]
-                if var_name == 'SERVICECHECKCOMMAND':
-                    continue
-                (var_name, value) = var.split('::')
-            else:
-                var_name = ""
-            if var_name == 'TIMET':
-                time = value
-            if var_name == 'HOSTNAME':
-                host_name = value
-            if var_name == 'SERVICEPERFDATA':
-                service_perf_data = value.replace('/', '_')
-            if var_name == 'GRAPHITEPOSTFIX':
-                value = re.sub("\s", "", value)
-                if value != "$_SERVICEGRAPHITEPOSTFIX$":
-                    graphite_postfix = value
-            if var_name == 'GRAPHITEPREFIX':
-                value = re.sub("\s", "", value)
-                if value != "$_SERVICEGRAPHITEPREFIX$":
-                    graphite_prefix = value
+        log.warning("Error building tsd list: " + str(e))
+        return
 
-        if not re.search("=", service_perf_data):
-            # no perfdata to parse, so we're done
-            continue
-        if graphite_prefix == "" and graphite_postfix == "":
-# uncomment below if you are troubleshooting a weird plugin.
-#            log.debug("can't find graphite prefix or postfix in %s on %s" % (
-#                line, file_name))
-            continue
-        if graphite_prefix is not "":
-            carbon_string = "%s." % graphite_prefix
-        if host_name is not "":
-            carbon_string = carbon_string + "%s." % host_name
+    log.debug('tsd_lines=' + str(tsd_lines))
+    if len(tsd_lines) > 0:
+        if send_tsd(tsd_lines):
+            log.debug("OK sent %d metrics to tsd" % len(tsd_lines))
+            if options.more_metrics:
+                for item in tsd_lines:
+                    print item
         else:
-            log.debug("can't find hostname in %s on %s" % (line, file_name))
-            continue
-        if graphite_postfix is not "":
-            carbon_string = carbon_string + "%s." % graphite_postfix
-        graphite_lines.extend(process_service_perf_data(carbon_string, \
-            service_perf_data, time))
-
-    handle_file(file_name, graphite_lines, test_mode, delete_after)
+            log.warning("Problem sending metric to: " + str(gearman_server[0]))
+    else: 
+            log.debug("No perfdata found in this iteration") 
+    return
 
 
 def process_perf_string(nagios_perf_string):
     """
-        given a single nagios perf string, returns a processed value.
-        Expected values:
-            label=value[UOM];[warn];[crit];[min];[max]
-        We want to scrape the label=value and get rid of everything else.
-
-        UOM can be: s, %, B(kb,mb,tb), c
-
-        graphios assumes that you have modified your plugin to always use
-        the same value. If your plugin does not support this, you can use
-        check_mp to force your units to be consistent. Graphios plain
-        ignores the UOM.
+        splits out the values and metric names based on an '='
+        test for an '=' before calling or test for ValueError
     """
-#    log.debug("perfstring:%s" % (nagios_perf_string))
+
     tmp = re.findall("=?[^;]*", nagios_perf_string)
     (name, value) = tmp[0].split('=')
     value = re.sub('[a-zA-Z]', '', value)
     value = re.sub('\%', '', value)
+
     return name, value
 
 
-def process_service_perf_data(carbon_string, perf_data, time):
+def process_perfdata_tsd(perf_data, time, tags):
     """
-        given the nagios perfdata, and some variables we return a list of
-        carbon formatted strings.
+        loops perfdata and builds a list of result
     """
-    graphite_lines = []
-#    log.debug('perfdata:%s' % (perf_data))
-    # find out if this is 1 perf statement or many, by counting how many '='
-    d = dict.fromkeys(perf_data, 0)
-    for c in perf_data:
-        d[c] += 1
-    if d['='] is 1:
-        (name, value) = process_perf_string(perf_data)
-        new_line = "%s%s %s %s" % (carbon_string, name, value, time)
-        log.debug("new line = %s" % (new_line))
-        graphite_lines.append(new_line)
-    else:
-        perf_list = perf_data.split(" ")
-        for perf in perf_list:
-            (name, value) = process_perf_string(perf)
-            new_line = "%s%s %s %s" % (carbon_string, name, value, time)
-            log.debug("new line = %s" % (new_line))
-            graphite_lines.append(new_line)
+    tsd_lines = []
+    perf_list = perf_data.split(" ")
 
-    return graphite_lines
+    if '=' not in perf_data:
+        return tsd_lines
+
+    for perf in perf_list:
+
+        (name, value) = process_perf_string(perf)
+        new_line = "%s %s %s %s" % (name, time, value, ' '.join(tags))
+        log.debug("new line = %s" % (new_line))
+        tsd_lines.append(new_line)
+
+    return tsd_lines
 
 
 def process_spool_dir(directory):
     """
         processes the files in the spool directory
     """
+    log.info("Using spool dir as performance data source")
     file_list = os.listdir(directory)
     for file in file_list:
         if file == "host-perfdata" or file == "service-perfdata":
             continue
         file_dir = os.path.join(directory, file)
-        if re.match('host-perfdata\.', file):
-            process_host_data(file_dir, 1)
-        if re.match('service-perfdata\.', file):
-            process_service_data(file_dir, 1)
+        process_data_file(file_dir, 1)
+
+def task_listener_perfdata(gearman_worker, gearman_job):
+    """
+    the gearma worker callback function
+    """
+    decrypted = DecodeAES(cipher, gearman_job.data)
+
+    # make array of data split on tab, for use -in this function-
+    d = decrypted.split('\t')
+    r = 'Job() - %s %s %s %s %s %s %s %s' % (d[0],d[1],d[2],d[3],d[4],d[5],d[6],d[7])
+
+    if d[0].endswith("PERFDATA"):
+        process_service_data_gearman(d)
+
+    return r
+
+
+def process_gearman_queue(directory):
+    """
+        setup decrypt cipher - processes the perfdata info from the gearman queue - run callback
+    """
+    log.info("Using gearman queue as perfdata source")
+    
+    global secretkey
+
+    # the block size for the cipher object; must be 16, 24, or 32 for AES
+    blocksize = 16
+
+    # maximum/minimum key string size
+    maxsize = 32
+
+    # bring keystring to the right size. If it's too short, fill with \x0
+    if (len(secretkey) < maxsize):
+        mod = maxsize - len(secretkey)%maxsize
+        for i in range(mod):
+            secretkey = secretkey + chr(0)
+    elif (len(secretkey) > maxsize):
+        secretkey = secretkey[0:maxsize]
+
+    # the character used for padding--with a block cipher such as AES, the value
+    # you encrypt must be a multiple of blocksize in length.  This character is
+    # used to ensure that your value is always a multiple of blocksize
+    padding = '{'
+
+    # one-liner to sufficiently pad the text to be encrypted
+    pad = lambda s: s + (blocksize - len(s) % blocksize) * padding
+
+    # one-liners to encrypt/encode and decrypt/decode a string
+    # encrypt with AES, encode with base64
+    EncodeAES = lambda c, s: base64.b64encode(c.encrypt(pad(s)))
+    global DecodeAES
+    DecodeAES = lambda c, e: c.decrypt(base64.b64decode(e)).rstrip(padding)
+
+    # create a cipher object using the secret
+    global cipher 
+    cipher = AES.new(secretkey)
+
+    # from python-gearaman docs..
+    gm_worker = gearman.GearmanWorker(gearman_server)
+
+    # gm_worker.set_client_id is optional
+    gm_worker.set_client_id(worker_id)
+
+    log.info("Starting gearman perfdata worker on " + str(worker_id)
+        + " connecting to gearman queue at " + str(gearman_server))
+
+    gm_worker.register_task('perfdata', task_listener_perfdata)
+
+
+    # Enter our work loop and call gm_worker.after_poll() after each time we timeout/see socket activity
+    gm_worker.work()
 
 
 def main():
-    """
-        the main
-    """
+
+    # see perfdata_source config value
+    workers =   {
+                    0 : process_spool_dir, 
+                    1 : process_gearman_queue,
+                }
     global sock
-    log.info("graphios startup.")
+    log.info("Gearphite starting up")
     try:
-        connect_carbon()
+        connect_tsd()
         while True:
-            process_spool_dir(spool_directory)
-            time.sleep(sleep_time)
+            workers[perfdata_source](spool_directory)
+            time.sleep(sleep_time) # only affects spool directory parsing
     except KeyboardInterrupt:
-        log.info("ctrl-c pressed. Exiting graphios.")
+        log.info("ctrl-c pressed. Exiting gearphite.")
 
 
 if __name__ == '__main__':
     main()
+
