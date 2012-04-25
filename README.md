@@ -1,14 +1,14 @@
 # Introduction
 
-Gearphite is a fork of Graphios to support processing of nagios performance data from a mod_gearman queue as well as nagios spool directory.
+Gearphite is a fork of Graphios to support processing of nagios performance data from a mod_gearman queue or nagios spool directory.
 
-Instead of sending to graphite, it sends a opentsdb daemon.
+Instead of sending to graphite, it sends to a opentsdb daemon.
 
 # Requirements
 
 * A working nagios / icinga server
 * A working opentsdb install and running tsd daemon
-* Python 2.4 or later
+* Python 2.4 or later, 2.6 reccomended
 * working mod_gearman setup, with perfdata=yes
 
 # License
@@ -68,7 +68,7 @@ Gearphite perfdata from spool directory has not been tested. Gearman queue perfd
 
 Performance
 -----------
-On a busy c1.xlarge ec2 instance It devours about 200 metrics a second to opentsdb. This could be improved with less string and regex operations. To get more than than you can run multiple daemons.
+On a busy c1.xlarge ec2 instance It delivers about a max of 2000 metrics a second to opentsdb. This could be improved with less string and regex operations. To get more than than you can run multiple daemons.
 
 
 # Installation
