@@ -1,0 +1,40 @@
+#!/usr/bin/env /usr/bin/python
+#
+# gearphite config file
+
+# opentsdb tsd server name
+tsd_server = 'TSD-SERVER-HOSTNAME'
+
+# opentsdb tsd server port 
+tsd_port = 4242
+
+# hostname:port of the gearman server
+# overridden in init.d script
+gearman_server = [ 'GEARMAN-SERVER-HOST1:4730' ]
+
+# worker id 
+worker_id = 'perfdata_'+socket.gethostname()
+
+# list of characters that get thrown out of metric names, values, tags, etc
+badchars = '!#@$%`~^&*();:'
+
+# enable sending gearphite mps (metrics per second) metric to opentsdb
+counter = 1
+
+# nagios spool directory
+spool_directory = '/var/spool/nagios/gearphite'
+
+# set to 1 to use a gearman queue, or 0 to use a nagios spool directory
+perfdata_source = 1
+
+# console log settings
+log_level = 'info'
+
+# How long to sleep between processing the spool directory and reconnect to tsd
+sleep_time = 15
+
+# when we can't connect to opentsdb, the sleeptime is doubled until we hit max
+sleep_max = 30
+
+# set secret key  
+secretkey = 'specialsaucekey'

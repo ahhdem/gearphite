@@ -1,63 +1,169 @@
-#! /bin/bash
+#!/bin/bash
 #
-# simple init script for graphios
+# chkconfig: 2345 99 20 
 #
+# Licensed under the Apache License, Version 2.0 (the "License"); you may not
+# use this file except in compliance with the License. You may obtain a copy of
+# the License at
 #
-# chkconfig: 345 99 01
-# description: graphios nagios -> graphite script
+#   http://www.apache.org/licenses/LICENSE-2.0
 #
-# File : graphios
+# Unless required by applicable law or agreed to in writing, software
+# distributed under the License is distributed on an "AS IS" BASIS, WITHOUT
+# WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied. See the
+# License for the specific language governing permissions and limitations under
+# the License.
+#
+# 2012, Karsten McMinn, Playfish-EA
+#
+# gearphite.py init.d script
+# processname: gearphite
+# config: inside gearphite.py
+# pidfile: /var/run/gearphite_a.pid
+# pidfile: /var/run/gearphite_b.pid
 
 # Source function library.
 . /etc/init.d/functions
 
-# Source networking configuration.
-. /etc/sysconfig/network
-
-# Check that networking is up.
-[ "$NETWORKING" = "no" ] && exit 0
-
-prog="/opt/nagios/bin/graphios.py"
-GRAPHIOS_USER="nagios"
 RETVAL=0
+ARGS=""
+PROG="gearphite.py"
+EXTPROG="gearphite.py"
+SERVICE=`basename $0`
+PIDFILE_A="/var/run/gearman_a.pid"
+PIDFILE_B="/var/run/gearman_b.pid"
+CONFIG_A="-c /etc/gearphite.conf -s GEARMAN-SERVER-HOST1:4730"
+CONFIG_B="-c /etc/gearphite.conf -s GEARMAN-SERVER-HOST2:4730"
+LOGFILE_A="/var/log/gearphite_a.log"
+LOGFILE_B="/var/log/gearphite_b.log"
+export PATH=$PATH:/usr/local/bin
 
 start () {
-        echo -n "Starting $prog"
-        /bin/su - $GRAPHIOS_USER -c "$prog &"
-        RETVAL=$?
-        [ $RETVAL -eq 0 ] && success || failure
-        echo
+	echo -n $"Starting [$PROG]: "
+		$PROG $CONFIG_A >$LOGFILE_A 2>&1 &
+		sleep 1
+		PIDA=`pgrep -f "$PROG $CONFIG_A" 2>/dev/null`
+		if [ -z "$PIDA" ]; then
+			RETVAL=1
+		else
+			echo $PIDA>$PIDFILE_A
+			RETVAL=0
+		fi
+		
+                $PROG $CONFIG_B >$LOGFILE_B 2>&1 &
+                sleep 1
+                PIDB=`pgrep -f "$PROG $CONFIG_B" 2>/dev/null`
+                if [ -z "$PIDB" ]; then
+                        RETVAL=1
+                else
+                        echo $PIDB>$PIDFILE_B
+                        RETVAL=0
+                fi
+
+		[ "$RETVAL" -eq 0 ] && echo -n "PIDS=$PIDA,$PIDB"
+		[ "$RETVAL" -eq 0 ] && echo -ne '\t\t\t\t[  \033[32mOK\033[0m  ]\n'
+		[ "$RETVAL" -gt 0 ] && echo -ne '\t\t\t\t[  \033[1;31mFAILED\033[0m  ]\n'
+		
 }
 
 stop () {
-        echo -n "Stopping $prog"
-        killproc graphios.py
-        RETVAL=$?
-        [ $RETVAL -eq 0 ] && success || failure
-        echo
+	# killproc -p
+	echo -n $"Stopping [$PROG]: "
+        if [ -f "$PIDFILE_A" ] && [ -f "$PIDFILE_B" ]; then
+		killproc -p $PIDFILE_A >/dev/null 2>&1
+		RETVALA=$?
+		killproc -p $PIDFILE_B >/dev/null 2>&1
+		RETVALB=$?
+		if [ $RETVALA -eq 0 ] && [ $RETVALB -eq 0 ]; then
+			rm -f $PIDFILE_A
+			rm -f $PIDFILE_B
+			RETVAL=0
+		else
+			RETVAL=1
+		fi
+
+	else
+		echo -n "PIDFILE Missing"
+		PIDA=`pgrep -f $EXTPROG $CONFIG_A 2>/dev/null`
+		PIDB=`pgrep -f $EXTPROB $CONFIG_B 2>/dev/null`
+		if [ -z "$PIDA" ] && [ -z "$PIDB" ]; then
+			PID=`pgrep -f $PROG 2>/dev/null`
+			if [ -z "$PID" ]; then
+				RETVAL=1
+			else
+				kill -KILL $PID >/dev/null 2>&1
+				RETVAL=0
+			fi
+		else
+			kill -KILL $PIDA
+			RETVALA=$?
+			kill -KILL $PIDB
+			RETVALB=$?
+			if [ "$RETVALA" -eq 0 ] && [ "$RETVALB" -eq 0 ]; then
+				RETVAL=0
+			else
+				RETVAL=1
+			fi
+		fi
+			
+	fi
+	[ "$RETVAL" -eq 0 ] && echo -ne '\t\t\t\t[  \033[32mOK\033[0m  ]\n'
+	[ "$RETVAL" -gt 0 ] && echo -ne '\t\t\t\t[  \033[1;31mFAILED\033[0m  ]\n'
+
 }
 
-restart () {
-        stop
-        start
+
+status () {
+    echo -n "Status [$PROG]: "
+	if [ -f "$PIDFILE_A" ] && [ -f "$PIDFILE_B" ]; then 
+		PIDA=`cat $PIDFILE_A`
+		PIDB=`cat $PIDFILE_B`
+		ps -p $PIDA >/dev/null 2>&1
+		RETVALA=$?
+		ps -p $PIDB >/dev/null 2>&1
+		RETVALB=$?
+		if [ "$RETVALA" -eq 0 ] & [ "$RETVALB" -eq 0 ]; then
+			echo -n "PIDS=$PIDA,$PIDB"
+			RETVAL=0
+		else
+			RETVAL=1
+		fi
+
+	else
+		echo -n "PIDFILES MISSING: "
+		PIDA=`pgrep -f $PROG $CONFIG_A 2>/dev/null`
+		PIDB=`pgrep -f $PROG $CONFIG_B 2>/dev/null`
+		if [ -z "$PIDA" ] || [ -z "$PIDB" ]; then
+			RETVAL=1
+		else
+			echo -n "Gearphite Running"
+			RETVAL=0
+		fi
+	fi
+
+
+        [ "$RETVAL" -eq 0 ] && echo -ne '\t\t\t\t[  \033[32mOK\033[0m  ]\n'
+        [ "$RETVAL" -gt 0 ] && echo -ne '\t\t\t\t[  \033[1;31mFAILED\033[0m  ]\n'
 }
 
-
-# See how we are called.
+# See how we were called.
 case "$1" in
   start)
-        start
-        ;;
+	start
+	;;
   stop)
-        stop
-        ;;
+	stop
+	;;
+  status)
+	status $PROG
+	;;
   restart|reload)
-        restart
-        ;;
+	stop
+	start
+	;;
   *)
-        echo "Usage: service graphios {start|stop|restart|reload}"
-        RETVAL=2
-        ;;
+	echo $"Usage: $0 {start|stop|status|restart|reload}"
+	exit 1
 esac
 
-exit $RETVAL
+exit $?

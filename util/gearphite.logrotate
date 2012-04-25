@@ -1,0 +1,19 @@
+/var/log/gearphite_a.log {
+    missingok
+    notifempty
+    sharedscripts
+    delaycompress
+    postrotate
+        /sbin/service gearphite restart >/dev/null 2>/dev/null || true
+    endscript
+}
+
+/var/log/gearphite_b.log {
+    missingok
+    notifempty
+    sharedscripts
+    delaycompress
+    postrotate
+        /sbin/service gearphite restart >/dev/null 2>/dev/null || true
+    endscript
+}
