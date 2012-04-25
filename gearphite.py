@@ -1,9 +1,18 @@
-#!/usr/bin/env /usr/bin/python 
+#!/usr/bin/env /usr/bin/python
+# gearphite.py
+# Copyright (C) 2012, Karsten McMinn, Adam Backer
+#
+# This program is free software; you can redistribute it and/or
+# modify it under the terms of the GNU General Public License
+# as published by the Free Software Foundation; either version 2
+# of the License, or (at your option) any later version.
+#
+# This program is distributed in the hope that it will be useful,
+# but WITHOUT ANY WARRANTY; without even the implied warranty of
+# MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE.  See
+# http://www.gnu.org/licenses/gpl-2.0.html for more details
 """
-    gearphite - gearman perfdata ripper
-    copyright 2012, Adam Backer, Karsten McMinn
-
-    Ugly yet effective daemon script for pushing
+    ugly yet effective tool for pushing
     data into opentsdb from nagios.
 """
 
@@ -17,8 +26,8 @@ import time
 import socket
 import cPickle as pickle
 import struct
-
-import gearman, base64
+import gearman
+import base64
 from Crypto.Cipher import AES
 
 # log levels
@@ -30,58 +39,32 @@ logLevels = {
                 'debug': logging.DEBUG,
             }
 
-
-# opentsdb tsd server name
-tsd_server = 'graph.dev.internal.playfish.com'
-
-# opentsdb tsd server port 
-tsd_port = 8081
-
-# hostname:port of where the gearman queue is
-gearman_server = [ 'dev-mon-nag02m:4730' ]
-
-# worker id 
-worker_id = 'perfdata_'+socket.gethostname()
-
-# nagios spool directory
-spool_directory = '/var/spool/nagios/gearphite'
-
-#use nagios spool directory or gearman (0:spool or 1:gearman) -- addition, not from PoC
-perfdata_source = 1 
-
-# gearphite log locatoin
-log_max_size = 25165824         # 24 MB
-log_file = '/mnt/logs/icinga/gearphite.log'
-
-# uncomment to override setting log level on command line
-log_level = 'info'
-
-# How long to sleep between processing the spool directory
-sleep_time = 15
-
-# when we can't connect to opentsdb, the sleeptime is doubled until we hit max
-sleep_max = 30
-
-#set secret key  
-secretkey = 'pfg342m4n'
+sock = socket.socket()
+lasttime = time.time()
+hostname = socket.gethostname()
+gcounter = 0
 
 
 parser = optparse.OptionParser()
-parser.add_option('-l', '--logging-level', help='set log level (critical,error,warning,info, debug) \
-    default set to: ' +str(log_level))
-parser.add_option('-m', '--more-metrics', action="store_true", help='enable printing of ' 
-    + 'each sent metric, one per line')
-parser.add_option('-s', '--gearman-server', help='specify a gearman server to connect to'
-    + ' [format HOST:PORT]')
+parser.add_option('-c', '--config', help='full path to the config file')
+parser.add_option('-l', '--logging-level',
+    help='set log level (critical,error,warning,info, debug')
+parser.add_option('-m', '--more-metrics', action="store_true",
+    help='enable printing of each sent metric, one per line')
+parser.add_option('-s', '--gearman-server',
+    help='specify a gearman server to connect to [format HOST:PORT]')
+parser.add_option('-g', '--counter', action="store_true",
+    help='enable gearphite mps counter')
 (options, args) = parser.parse_args()
 
-sock = socket.socket()
 
+if options.config:
+    execfile(str(options.config))
+else:
+    print "No config specified, trying default: /etc/gearphite.conf"
+    execfile(str('/etc/gearphite.conf'))
 
-# log not available to all threads if defined in main(), cheap hack
 log = logging.getLogger('log')
-log_handler = logging.handlers.RotatingFileHandler(log_file,
-    maxBytes=log_max_size, backupCount=4)
 f = logging.Formatter("%(asctime)s %(filename)s %(levelname)s %(message)s",
     "%B %d %H:%M:%S")
 
@@ -99,22 +82,45 @@ else:
     log.addHandler(console)
 
 if options.gearman_server:
-    gearman_server = [ options.gearman_server ]
+    gearman_server = [options.gearman_server]
+
+if options.counter:
+    counter = 1
 
 
 def connect_tsd():
-    """
-        Connects to  a OpenTSDB TSD daemon 
-    """
     global sock
+    global tsd_server
+    global tsd_port
+    """
+        Connects to  a OpenTSDB TSD daemon
+    """
+    log.debug("trying to connect to tsd with hostname: " \
+        + str(tsd_server) + " and port: " + str(tsd_port))
     sock = socket.socket()
+    sock.connect((tsd_server, tsd_port))
+    log.info("TSD service connected successfully at: "
+        + tsd_server + ":" + str(tsd_port))
+
+
+def test_tsd():
+    global sock
+
     try:
-        sock.connect((tsd_server, tsd_port))
-        return True
-    except Exception, e:
-        log.warning("Can't connect to TSD Service: %s:%s %s" % (tsd_server,
-            tsd_port, e))
+        peer = sock.getpeername()
+    except socket.error:
         return False
+    else:
+        return True
+
+
+def close_tsd():
+    global sock
+    try:
+        sock.close()
+    except Exception, e:
+        log.debug("exception closing socket: " + str(e))
+
 
 def send_tsd(output):
     """
@@ -123,6 +129,7 @@ def send_tsd(output):
     """
     global sock
     global sleep_time
+
     message = ''
     for elei in output:
         line = 'put ' + elei
@@ -130,31 +137,26 @@ def send_tsd(output):
 
     if not message:
         log.debug("tsd message empty, not sending")
-        return
+        return False
 
     try:
         sock.sendall(message)
         log.debug("sending to opentsdb: %s" % message)
         return True
-    except Exception, e:
+    except socket.error, e:
         log.critical("Can't send message to opentsdb error:%s" % (e))
-        while True:
-            sock.close()
-            if connect_tsd():
-                sleep_time = 15     # reset sleep_time to 15
-                return False
-            else:
-                if sleep_time < sleep_max:
-                    sleep_time = sleep_time + sleep_time
-                    log.warning("TSD Service not responding. Increasing " + \
-                        "sleep_time to %s." % (sleep_time))
-                else:
-                    log.warning("TSD Service not responding. Sleeping %s" % \
-                        (sleep_time))
-            log.debug("sleeping %s" % (sleep_time))
+        close_tsd()
+        try:
+            log.debug("Attempting to reconnect tsd")
+            connect_tsd()
+        except socket.error, e:
+            log.debug("Could not reconnect tsd, sleeping once: " \
+                + str(e))
             time.sleep(sleep_time)
-        return False
-
+            return False
+        else:
+            log.info("TSD Service reconnected")
+            return True
 
 
 def process_data_file(file_name, delete_after=0):
@@ -162,7 +164,11 @@ def process_data_file(file_name, delete_after=0):
         processes a file loaded with nagios perf data, and send to a
         a tsd server
     """
+    global tsd_server
+    global hostname
     tsd_lines = []
+
+    tags = ['metricsource=' + hostname]
 
     try:
         f = open(file_name, "r")
@@ -177,15 +183,16 @@ def process_data_file(file_name, delete_after=0):
 
         host, command, time, service_perf_data = scrub_perfdata(perfdata)
 
-
-        tags.append('host='+str(host))
+        tags.append('host=' + str(host))
 
         if command:
-            tags.append('command='+command)
+            tags.append('command=' + command)
 
-        log.debug("serviceperfdata="+service_perf_data)
+        log.debug("serviceperfdata=" + service_perf_data)
         try:
-            tsd_lines.extend(process_perfdata_tsd(service_perf_data, time, tags))
+            tsd_lines.extend(
+                process_perfdata_tsd(service_perf_data, time, tags)
+            )
         except Exception, e:
             log.warning("Error building tsd list: " + str(e))
             return
@@ -206,16 +213,21 @@ def process_data_file(file_name, delete_after=0):
                         log.critical("couldn't remove file %s error:%s" % (
                             file_name, e))
             else:
-                log.warning("Problem sending metric to: " + str(gearman_server[0]))
+                log.warning("Problem sending metric to: "
+                    + str(tsd_server))
         else:
-                log.debug("No perfdata found in this iteration")
-        return
+            log.debug("No perfdata found in this iteration")
+
 
 def scrub_perfdata(perfdata):
-
+    """
+    sort the perf data
+    """
+    global badchars
     if not (len(perfdata) > 0):
         log.warning("empty string coming from the gearman queue")
         return
+
     if not '=' in ''.join(perfdata):
         log.warning('No perfdata found in string value..' + perfdata)
         return
@@ -223,7 +235,7 @@ def scrub_perfdata(perfdata):
     for elem in perfdata:
         log.debug('Working on item: ' + str(elem))
 
-        if 'HOSTNAME' in elem:
+        if 'HOSTNAME::' in elem:
             host = elem.split('::')[1]
             if len(host) < 2:
                 log.warning('something wrong with hostname: ' + str(host))
@@ -234,13 +246,13 @@ def scrub_perfdata(perfdata):
             if '/' in service_perf_data:
                 service_perf_data = service_perf_data.replace('/', '_')
 
-        if 'CHECKCOMMAND' in elem:
+        if 'CHECKCOMMAND::' in elem:
             command = elem.split('::')[1]
+            command = command.translate(None, badchars)
 
-
-        if 'TIMET' in elem:
+        if 'TIMET::' in elem:
             time = elem.split('::')[1]
-    
+
     if not command:
         command = 'null'
 
@@ -251,7 +263,31 @@ def scrub_perfdata(perfdata):
             + str(service_perf_data))
         return
     else:
-        return ( host, command, time, service_perf_data )
+
+        log.debug('succesfully sorted perfdata '
+            ' host=' + str(host) + ' command=' + str(command)
+            + ' time=' + str(time) + ' service_perf_data='
+            + str(service_perf_data))
+        return (host, command, time, service_perf_data)
+
+
+def gearphite_perf(metrics):
+    global lasttime
+    global gcounter
+    global hostname
+
+    second = lasttime + 1
+    now = time.time()
+
+    if now >= second:
+        xtime = str(now).split('.')[0]
+        gmsg = 'mps ' + xtime + ' ' + str(gcounter) + ' metricsource=' \
+            + hostname + ' host=' + hostname + ' command=gearphite'
+        gcounter = 0
+        lasttime = time.time()
+        return gmsg
+    else:
+        gcounter = gcounter + metrics
 
 
 def process_service_data_gearman(perfdata):
@@ -259,20 +295,24 @@ def process_service_data_gearman(perfdata):
         callback that parses monitoring data from gearman queue
         and sends off to a server
     """
-    global geaman_server
+    global tsd_server
+    global gearman_server
+    global worker_id
     global options
+    global counter
+
     server = gearman_server[0].split(':')[0]
     tsd_lines = []
-    tags = [ 'metricsource='+server ]
+    tags = ['metricsource=' + server]
 
     host, command, time, service_perf_data = scrub_perfdata(perfdata)
-    
-    tags.append('host='+str(host))
+
+    tags.append('host=' + str(host))
 
     if command:
-        tags.append('command='+command)
+        tags.append('command=' + command)
 
-    log.debug("serviceperfdata="+service_perf_data)
+    log.debug("serviceperfdata=" + service_perf_data)
     try:
         tsd_lines.extend(process_perfdata_tsd(service_perf_data, time, tags))
     except Exception, e:
@@ -280,30 +320,40 @@ def process_service_data_gearman(perfdata):
         return
 
     log.debug('tsd_lines=' + str(tsd_lines))
-    if len(tsd_lines) > 0:
+    num = len(tsd_lines)
+
+    if counter:
+        log.debug("counter enabled sending stats")
+        gline = gearphite_perf(num)
+        if gline is not None:
+            tsd_lines.append(gline)
+            num = len(tsd_lines)
+
+    if num > 0:
         if send_tsd(tsd_lines):
-            log.debug("OK sent %d metrics to tsd" % len(tsd_lines))
+            log.debug("OK sent %d metrics to tsd" % num)
             if options.more_metrics:
                 for item in tsd_lines:
                     print item
+
         else:
-            log.warning("Problem sending metric to: " + str(gearman_server[0]))
-    else: 
-            log.debug("No perfdata found in this iteration") 
-    return
+            log.warning("Problem sending metric to: " + str(tsd_server))
+    else:
+        log.debug("No perfdata found in this iteration")
 
 
 def process_perf_string(nagios_perf_string):
     """
         splits out the values and metric names based on an '='
-        test for an '=' before calling or test for ValueError
+        remove extra characters from values
     """
 
+    global badchars
+    log.debug(nagios_perf_string)
     tmp = re.findall("=?[^;]*", nagios_perf_string)
     (name, value) = tmp[0].split('=')
-    value = re.sub('[a-zA-Z]', '', value)
-    value = re.sub('\%', '', value)
-
+    value = re.sub('[a-zA-Z%]', '', value)
+    name = name.translate(None, badchars)
     return name, value
 
 
@@ -319,6 +369,8 @@ def process_perfdata_tsd(perf_data, time, tags):
 
     for perf in perf_list:
 
+        if '=' not in perf:
+            continue
         (name, value) = process_perf_string(perf)
         new_line = "%s %s %s %s" % (name, time, value, ' '.join(tags))
         log.debug("new line = %s" % (new_line))
@@ -339,6 +391,7 @@ def process_spool_dir(directory):
         file_dir = os.path.join(directory, file)
         process_data_file(file_dir, 1)
 
+
 def task_listener_perfdata(gearman_worker, gearman_job):
     """
     the gearma worker callback function
@@ -347,8 +400,12 @@ def task_listener_perfdata(gearman_worker, gearman_job):
 
     # make array of data split on tab, for use -in this function-
     d = decrypted.split('\t')
-    r = 'Job() - %s %s %s %s %s %s %s %s' % (d[0],d[1],d[2],d[3],d[4],d[5],d[6],d[7])
+    r = 'Job() - %s %s %s %s %s %s %s %s' % \
+        (d[0], d[1], d[2], d[3], d[4], d[5], d[6], d[7])
 
+    log.debug("RAW DATA")
+    log.debug(d)
+    log.debug("END RAW")
     if d[0].endswith("PERFDATA"):
         process_service_data_gearman(d)
 
@@ -357,10 +414,11 @@ def task_listener_perfdata(gearman_worker, gearman_job):
 
 def process_gearman_queue(directory):
     """
-        setup decrypt cipher - processes the perfdata info from the gearman queue - run callback
+        setup decrypt cipher - processes the perfdata
+        info from the gearman queue - run callback
     """
     log.info("Using gearman queue as perfdata source")
-    
+
     global secretkey
 
     # the block size for the cipher object; must be 16, 24, or 32 for AES
@@ -371,15 +429,16 @@ def process_gearman_queue(directory):
 
     # bring keystring to the right size. If it's too short, fill with \x0
     if (len(secretkey) < maxsize):
-        mod = maxsize - len(secretkey)%maxsize
+        mod = maxsize - len(secretkey) % maxsize
         for i in range(mod):
             secretkey = secretkey + chr(0)
     elif (len(secretkey) > maxsize):
         secretkey = secretkey[0:maxsize]
 
-    # the character used for padding--with a block cipher such as AES, the value
-    # you encrypt must be a multiple of blocksize in length.  This character is
-    # used to ensure that your value is always a multiple of blocksize
+    # the character used for padding--with a block cipher such as AES,
+    # the value you encrypt must be a multiple of blocksize
+    # in length.  This character is used to ensure that your
+    # value is always a multiple of blocksize
     padding = '{'
 
     # one-liner to sufficiently pad the text to be encrypted
@@ -392,7 +451,7 @@ def process_gearman_queue(directory):
     DecodeAES = lambda c, e: c.decrypt(base64.b64decode(e)).rstrip(padding)
 
     # create a cipher object using the secret
-    global cipher 
+    global cipher
     cipher = AES.new(secretkey)
 
     # from python-gearaman docs..
@@ -401,34 +460,50 @@ def process_gearman_queue(directory):
     # gm_worker.set_client_id is optional
     gm_worker.set_client_id(worker_id)
 
-    log.info("Starting gearman perfdata worker on " + str(worker_id)
-        + " connecting to gearman queue at " + str(gearman_server))
+    log.info("Starting gearman worker on " + str(worker_id)
+        + " at " + str(gearman_server))
 
     gm_worker.register_task('perfdata', task_listener_perfdata)
 
-
-    # Enter our work loop and call gm_worker.after_poll() after each time we timeout/see socket activity
+    # Enter our work loop and call gm_worker.after_poll()
+    # after each time we timeout/see socket activity
     gm_worker.work()
 
 
 def main():
 
-    # see perfdata_source config value
-    workers =   {
-                    0 : process_spool_dir, 
-                    1 : process_gearman_queue,
-                }
-    global sock
+    workers = {0: process_spool_dir, 1: process_gearman_queue}
+
     log.info("Gearphite starting up")
-    try:
-        connect_tsd()
-        while True:
+
+    while True:
+
+        try:
+            if not test_tsd():
+                connect_tsd()
+
+        except socket.error, e:
+            log.error("Can't connect to TSD Service: %s:%s %s" % (tsd_server,
+                tsd_port, e))
+            log.info("sleeping for: " + str(sleep_time) + " seconds")
+            time.sleep(sleep_time)
+            continue
+
+        try:
             workers[perfdata_source](spool_directory)
-            time.sleep(sleep_time) # only affects spool directory parsing
-    except KeyboardInterrupt:
-        log.info("ctrl-c pressed. Exiting gearphite.")
+
+        except Exception, e:
+            log.error("Problem starting spool or gearman: " + str(e))
+            log.info("Sleeping for: " + str(sleep_time) + " seconds")
+            time.sleep(sleep_time)
+            continue
+
+        time.sleep(sleep_time)
 
 
 if __name__ == '__main__':
-    main()
-
+    try:
+        main()
+    except KeyboardInterrupt:
+        log.warning("ctrl-c pressed. Exiting gearphite.")
+        sys.exit(1)
