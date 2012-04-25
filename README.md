@@ -78,67 +78,12 @@ Setting this up on the nagios front is very much like pnp4nagios with npcd. (You
 
 Steps:
 
-(1) nagios.cfg
+(1) nagios/gearman
 --------------
 
-Your nagios.cfg is going to need to modified to send the graphite data to the perfdata files.
+See: https://github.com/shawn-sterling/graphios/blob/master/README.md for details about configuring nagios spool directory. Whether you are using the spool directory or gearman, this script basically is needs a string with the word PERFDATA in it with values separated by whitespace. Other things like the command, host and time are scrubbed out. The expected format is a tab delimited string like this::
 
-<pre>
-service_perfdata_file=/var/spool/nagios/gearphite/service-perfdata
-service_perfdata_file_template=DATATYPE::SERVICEPERFDATA\tTIMET::$TIMET$\tHOSTNAME::$HOSTNAME$\tSERVICEDESC::$SERVICEDESC$\tSERVICEPERFDATA::$SERVICEPERFDATA$\tSERVICECHECKCOMMAND::$SERVICECHECKCOMMAND$\tHOSTSTATE::$HOSTSTATE$\tHOSTSTATETYPE::$HOSTSTATETYPE$\tSERVICESTATE::$SERVICESTATE$\tSERVICESTATETYPE::$SERVICESTATETYPE$\tGRAPHITEPREFIX::$_SERVICEGRAPHITEPREFIX$\tGRAPHITEPOSTFIX::$_SERVICEGRAPHITEPOSTFIX$
-
-service_perfdata_file_mode=a
-service_perfdata_file_processing_interval=15
-service_perfdata_file_processing_command=graphite_perf_service
-
-host_perfdata_file=/var/spool/nagios/gearphite/host-perfdata
-host_perfdata_file_template=DATATYPE::HOSTPERFDATA\tTIMET::$TIMET$\tHOSTNAME::$HOSTNAME$\tHOSTPERFDATA::$HOSTPERFDATA$\tHOSTCHECKCOMMAND::$HOSTCHECKCOMMAND$\tHOSTSTATE::$HOSTSTATE$\tHOSTSTATETYPE::$HOSTSTATETYPE$\tGRAPHITEPREFIX::$_HOSTGRAPHITEPREFIX$\tGRAPHITEPOSTFIX::$_HOSTGRAPHITEPOSTFIX$
-
-host_perfdata_file_mode=a
-host_perfdata_file_processing_interval=15
-host_perfdata_file_processing_command=graphite_perf_host
-</pre>
-
-Which sets up some custom variables, specifically:
-for services:
-$\_SERVICEGRAPHITEPREFIX
-$\_SERVICEGRAPHITEPOSTFIX
-
-for hosts:
-$\_HOSTGRAPHITEPREFIX
-$\_HOSTGRAPHITEPOSTFIX
-
-The prepended HOST and SERVICE is just the way nagios works, \_HOSTGRAPHITEPREFIX means it's the \_GRAPHITEPREFIX variable from host configuration.
-
-(2) nagios commands
--------------------
-
-There are 2 commands we setup in the nagios.cfg:
-
-graphite\_perf\_service
-graphite\_perf\_host
-
-Which we now need to define:
-
-I use include dirs, so I make a new file called gearphite\_commands.cfg inside my include dir. Do that, or add the below commands to one of your existing nagios config files.
-
-#### NOTE: Your spool directory may be different, this is setup in step (1) the service_perfdata_file, and host_perfdata_file.
-
-<pre>
-define command {
-    command_name            graphite_perf_host
-    command_line            /bin/mv /var/spool/nagios/gearphite/host-perfdata /var/spool/nagios/gearphite/host-perfdata.$TIMET$
-
-}
-
-define command {
-    command_name            graphite_perf_service
-    command_line            /bin/mv /var/spool/nagios/gearphite/service-perfdata /var/spool/nagios/gearphite/service-perfdata.$TIMET$
-}
-</pre>
-
-All these commands do is move the current files to a different filename that we can process without interrupting nagios. This way nagios doesn't have to sit around waiting for us to process the results.
-
+    DATATYPE::SERVICEPERFDATA TIMET::1335379911 HOSTNAME::my-server-01 SERVICEDESC::CPU load SERVICEPERFDATA::load1=0;20;40;0; load5=0.01;20;40;0; load15=0.02;20;40;0; SERVICECHECKCOMMAND::check_mk-cpu.loads SERVICESTATE::0 SERVICESTATETYPE::1\n\n\n\x00\x00\x00\x00\x00\x00\x00
 
 (3) gearphite.py
 ---------------
@@ -171,20 +116,22 @@ See the sample config in util/gearphite.conf.example for details on configuratio
 
 (4) Sample Install
 ----------------------------------
-git clone git://github.com/kmcminn/gearphite.git
-cp gearphite/util/gearphite.init /etc/init.d/gearphite
-cp gearphite/util/gearphite.logrotate /etc/logrotate.d
-cp gearphite/util/gearphite.conf.example /etc/gearphite.conf
-install gearphite/gearphite.py /usr/bin/gearphite.py
-chown root:root /etc/init.d/gearphite
+Here's a quick install for a centos/rhel distro::
 
-* edit /etc/gearphite.conf to your liking
-* edit /etc/init.d/gearphite to your liking
+    git clone git://github.com/kmcminn/gearphite.git
+    cp gearphite/util/gearphite.init /etc/init.d/gearphite
+    cp gearphite/util/gearphite.logrotate /etc/logrotate.d
+    cp gearphite/util/gearphite.conf.example /etc/gearphite.conf
+    install gearphite/gearphite.py /usr/bin/gearphite.py
+    chown root:root /etc/init.d/gearphite
 
-chkconfig add gearphite
-chkconfig gearphite on
-service gearphite start
+    * edit /etc/gearphite.conf to your liking
+    * edit /etc/init.d/gearphite to your liking
+
+    chkconfig add gearphite
+    chkconfig gearphite on
+    service gearphite start
 
 # About
 
-Goal was to get a simple script working. There are many ways it could be improved (twisted, threads/multiprocess), internal log rotation, pattern this and consolidate with the original projects, etc). Go for it! Pull reqs welcome. 
+Goal was to get a simple script working. There are many ways it could be improved (twisted, threads/multiprocess, internal log rotation, consolidate with other projects like bucky or graphios, add more statistics, etc). Go for it! Pull reqs welcome. 
