@@ -124,6 +124,7 @@ Here's a quick install for a centos/rhel distro::
     cp gearphite/util/gearphite.conf.example /etc/gearphite.conf
     install gearphite/gearphite.py /usr/bin/gearphite.py
     chown root:root /etc/init.d/gearphite
+    pip install gearman pycrypto
 
     * edit /etc/gearphite.conf to your liking
     * edit /etc/init.d/gearphite to your liking
