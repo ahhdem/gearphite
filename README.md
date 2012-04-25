@@ -143,202 +143,48 @@ All these commands do is move the current files to a different filename that we 
 (3) gearphite.py
 ---------------
 
-It doesn't matter where gearphite.py lives, I put it in ~nagios/bin . We put ours in path.
+It doesn't matter where gearphite.py lives, I put it in ~nagios/bin . We put ours in path. The util/gearphite.init wants it int /usr/bin/.
 
 The gearphite.py can run as whatever user you want, as long as you have access to the spool directory/gearman, log file.
 
-The config for gearphite.py is in the script itself. Maybe we'll throw in ConfigPaser and break out
-the config in the future.
+Gearphite has a few options on the command line as well as a interpreted config::
 
-#### NOTE: You WILL need to edit this script and change a few variables, they are right near the top and commented in the script. Here they are in case you are blind:
+    usage: gearphite.py [options]
 
-<pre>
-############################################################
-##### You will likely need to change some of the below #####
-
-# tsd hostname
-tsd_server = 'graph.tsd.server.foo'
-
-# tsd daemon port, user defined, we use 8081
-tsd_port = 8081
-
-# nagios spool directory
-spool_directory = '/var/spool/nagios/gearphite'
-
-# hostname:port of where the gearman queue is can also be specified with -s
-gearman_server = [ 'dev-mon-nag02m:4730' ]
-
-# gearman worker id
-worker_id = 'perfdata_'+socket.gethostname()
-
-#use nagios spool directory or gearman (0:spool or 1:gearman)
-perfdata_source = 1
-
-# gearphite log locatoin
-log_max_size = 25165824         # 24 MB
-log_file = '/var/log/gearphite.log'
-
-# log_level to write to the log file, info or warning recommended for production
-log_level = 'info'
-
-# How long to sleep between processing the spool/queue when a connection is lost to tsd
-sleep_time = 15
-
-# when we can't connect to opentsdb, the sleeptime is doubled until we hit max
-sleep_max = 60
-
-#set gearman secret key  
-secretkey = 'SUPERKEY'
-
-##############################################################################
-</pre>
+    options:
+      -h, --help            show this help message and exit
+      -c CONFIG, --config=CONFIG
+                            full path to the config file
+      -l LOGGING_LEVEL, --logging-level=LOGGING_LEVEL
+                            set log level (critical,error,warning,info, debug
+      -m, --more-metrics    enable printing of each sent metric, one per line
+      -s GEARMAN_SERVER, --gearman-server=GEARMAN_SERVER
+                            specify a gearman server to connect to [format
+                            HOST:PORT]
+      -g, --counter         enable gearphite mps counter
 
 
+To configure gearphite, set the values in the config file as appropiate for your installation of nagios/gearman, or run it from the command line overriding defaults in the config file such as the sample init.d script does.
 
-(4) Optional init script: gearphite
+See the sample config in util/gearphite.conf.example for details on configuration directives.
+
+
+(4) Sample Install
 ----------------------------------
-
-cp gearphite.init /etc/init.d/gearphite
+git clone git://github.com/kmcminn/gearphite.git
+cp gearphite/util/gearphite.init /etc/init.d/gearphite
+cp gearphite/util/gearphite.logrotate /etc/logrotate.d
+cp gearphite/util/gearphite.conf.example /etc/gearphite.conf
+install gearphite/gearphite.py /usr/bin/gearphite.py
 chown root:root /etc/init.d/gearphite
-chmod 750 /etc/init.d/gearphite
 
-#### NOTE: You may need to change the location and username that the script runs as. this slightly depending on where you decided to put gearphite.py
+* edit /etc/gearphite.conf to your liking
+* edit /etc/init.d/gearphite to your liking
 
-The lines you will likely have to change:
-<pre>
-prog="/opt/nagios/bin/gearphite.py"
-GRAPHIOS_USER="nagios"
-</pre>
+chkconfig add gearphite
+chkconfig gearphite on
+service gearphite start
 
-(5) Your host and service configs
----------------------------------
+# About
 
-Once you have done the above you need to add a custom variable to the hosts and services that you want sent to graphite.
-
-The format that will be sent to carbon is:
-
-<pre>
-_graphiteprefix.hostname._graphitepostfix.perfdata
-</pre>
-
-You do not need to set both graphiteprefix and graphitepostfix. Just one or the other will do. If you do not set at least one of them, the data will not be sent to graphite at all.
-
-Examples:
-
-<pre>
-define host {
-    name                        myhost
-    check_command               check_host_alive
-    _graphiteprefix             monitoring.nagios01.pingto
-}
-</pre>
-
-Which would create the following graphite entries with data from the check\_host\_alive plugin:
-
-    monitoring.nagios01.pingto.myhost.rta
-    monitoring.nagios01.pingto.myhost.rtmin
-    monitoring.nagios01.pingto.myhost.rtmax
-    monitoring.nagios01.pingto.myhost.pl
-
-<pre>
-define service {
-    service_description         MySQL threads connected
-    host_name                   myhost
-    check_command               check_mysql_health_threshold!threads-connected!3306!1600!1800
-    _graphiteprefix             monitoring.nagios01.mysql
-}
-</pre>
-
-Which gives me:
-
-    monitoring.nagios01.mysql.myhost.threads_connected
-
-See the Documentation (above) for more explanation on how this works.
-
-
-
-# PNP4Nagios Notes:
-
-Are you already running pnp4nagios? And want to just try this out and see if you like it? Cool! This is very easy to do without breaking your PNP4Nagios configuration (but do a backup just in case).
-
-Steps:
-
-(1) In your nagios.cfg:
------------------------
-
-Add the following at the end of your:
-
-<pre>
-host_perfdata_file_template
-\tGRAPHITEPREFIX::$_HOSTGRAPHITEPREFIX$\tGRAPHITEPOSTFIX::$_HOSTGRAPHITEPOSTFIX$
-
-service_perfdata_file_template
-\tGRAPHITEPREFIX::$_SERVICEGRAPHITEPREFIX$\tGRAPHITEPOSTFIX::$_SERVICEGRAPHITEPOSTFIX$
-</pre>
-
-This will add the variables to your check results, and will be ignored by pnp4nagios.
-
-(2) Change your commands:
--------------------------
-
-(find your command names under host\_perfdata\_file\_processing\_command and service\_perfdata\_file\_processing\_command in your nagios.cfg)
-
-You likely have 2 commands setup that look something like these two:
-
-<pre>
-define command{
-       command_name    process-service-perfdata-file
-       command_line    /bin/mv /usr/local/pnp4nagios/var/service-perfdata /usr/local/pnp4nagios/var/spool/service-perfdata.$TIMET$
-}
-
-define command{
-       command_name    process-host-perfdata-file
-       command_line    /bin/mv /usr/local/pnp4nagios/var/host-perfdata /usr/local/pnp4nagios/var/spool/host-perfdata.$TIMET$
-}
-</pre>
-
-Instead of just moving the file; move it then copy it, then we can point gearphite at the copy.
-
-You can do this by either:
-
-(1) Change the command\_line to something like:
-
-<pre>
-command_line    "/bin/mv /usr/local/pnp4nagios/var/host-perfdata /usr/local/pnp4nagios/var/spool/host-perfdata.$TIMET$ && cp /usr/local/pnp4nagios/var/spool/host-perfdata.$TIMET$ /usr/local/pnp4nagios/var/spool/gearphite"
-</pre>
-
-OR
-
-(2) Make a script:
-
-<pre>
-#!/bin/bash
-/bin/mv /usr/local/pnp4nagios/var/host-perfdata /usr/local/pnp4nagios/var/spool/host-perfdata.$TIMET$
-cp /usr/local/pnp4nagios/var/spool/host-perfdata.$TIMET$ /usr/local/pnp4nagios/var/spool/gearphite
-
-change the command_line to be:
-command_line    /path/to/myscript.sh
-</pre>
-
-You should now be able to start at step 3 on the above instructions.
-
-
-# Trouble getting it working?
-
-I will help the first few people that have problems getting this working, and update the documentation on what is not clear. I am not offering to teach you how to setup Nagios, this is for intermediate+ nagios users. Email me at shawn@systemtemplar.org and I will do what I can to help.
-
-# Got it working?
-
-Cool! Drop me a line and let me know how it goes.
-
-# Find a bug?
-
-Open an Issue on github and I will try to fix it asap.
-
-# Contributing
-
-I'm open to any feedback / patches / suggestions.
-
-I'm still learning python so any python advice would be much appreciated.
-
-Shawn Sterling shawn@systemtemplar.org
+Goal was to get a simple script working. There are many ways it could be improved (twisted, threads/multiprocess), internal log rotation, pattern this and consolidate with the original projects, etc). Go for it! Pull reqs welcome. 
